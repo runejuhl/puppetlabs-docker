@@ -21,9 +21,9 @@
 # puppet help.
 #
 # @param verify_digest
-#   (optional) Make sure, that the image has not modified. Compares the digest 
+#   (optional) Make sure, that the image has not modified. Compares the digest
 #   checksum before starting the docker image.
-#   To get the digest of an image, run the following command: 
+#   To get the digest of an image, run the following command:
 #     docker image inspect <<image>> --format='{{index .RepoDigests 0}}
 #
 # @param service_prefix
@@ -213,7 +213,7 @@ define docker::run(
   Optional[Variant[String,Array]]         $dns_search                        = [],
   Optional[Variant[String,Array]]         $lxc_conf                          = [],
   Optional[String]                        $service_prefix                    = 'docker-',
-  Optional[String]                        $service_provider                  = undef,
+  String                                  $service_provider                  = $docker::params::service_provider,
   Optional[Boolean]                       $restart_service                   = true,
   Optional[Boolean]                       $restart_service_on_docker_refresh = true,
   Optional[Boolean]                       $manage_service                    = true,
@@ -222,7 +222,7 @@ define docker::run(
   Optional[Boolean]                       $privileged                        = false,
   Optional[Boolean]                       $detach                            = undef,
   Optional[Variant[String,Array[String]]] $extra_parameters                  = undef,
-  Optional[String]                        $systemd_restart                   = 'on-failure',
+  Optional[Docker::SystemdRestart]        $systemd_restart                   = 'on-failure',
   Optional[Variant[String,Hash]]          $extra_systemd_parameters          = {},
   Optional[Boolean]                       $pull_on_start                     = false,
   Optional[Variant[String,Array]]         $after                             = [],
@@ -232,7 +232,7 @@ define docker::run(
   Optional[Boolean]                       $tty                               = false,
   Optional[Variant[String,Array]]         $socket_connect                    = [],
   Optional[Variant[String,Array]]         $hostentries                       = [],
-  Optional[String]                        $restart                           = undef,
+  Optional[Docker::Restart]               $restart                           = undef,
   Variant[String,Boolean]                 $before_start                      = false,
   Variant[String,Boolean]                 $before_stop                       = false,
   Variant[String,Boolean]                 $after_start                       = false,
@@ -254,19 +254,16 @@ define docker::run(
 ) {
   include docker::params
 
-  if ($socket_connect != []) {
+
+  $docker_command = if $socket_connect.empty {
+    $docker::params::docker_command
+  } else {
     $sockopts = join(any2array($socket_connect), ',')
     $docker_command = "${docker::params::docker_command} -H ${sockopts}"
-  } else {
-    $docker_command = $docker::params::docker_command
   }
 
   $service_name = $docker::service_name
   $docker_group = $docker::docker_group
-
-  if $restart {
-    assert_type(Pattern[/^(no|always|unless-stopped|on-failure)|^on-failure:[\d]+$/], $restart)
-  }
 
   if ($remove_volume_on_start and !$remove_container_on_start) {
     fail(translate("In order to remove the volume on start for ${title} you need to also remove the container"))
@@ -283,22 +280,13 @@ define docker::run(
     }
   }
 
-  if $systemd_restart {
-    assert_type(Pattern[/^(no|always|on-success|on-failure|on-abnormal|on-abort|on-watchdog)$/], $systemd_restart)
-  }
-
-  $service_provider_real = $service_provider ? {
-    undef   => $docker::params::service_provider,
-    default => $service_provider,
-  }
-
-  if $detach == undef {
-    $valid_detach = $service_provider_real ? {
+  $valid_detach = if $detach {
+    $detach
+  } else {
+    $service_provider ? {
       'systemd' => false,
       default   => $docker::params::detach_service_in_init,
     }
-  } else {
-    $valid_detach = $detach
   }
 
   $extra_parameters_array = any2array($extra_parameters)
@@ -340,16 +328,16 @@ define docker::run(
 
   $sanitised_title = docker::sanitised_name($title)
 
-  if empty($depends_array) {
-    $sanitised_depends_array = []
+  $sanitised_depends_array = if $depends_array.empty {
+    []
   } else {
-    $sanitised_depends_array = docker::sanitised_name($depends_array)
+    docker::sanitised_name($depends_array)
   }
 
-  if empty($after_array) {
-    $sanitised_after_array = []
+  $sanitised_after_array = if $after_array.empty {
+    []
   } else {
-    $sanitised_after_array = docker::sanitised_name($after_array)
+    docker::sanitised_name($after_array)
   }
 
   if $facts['os']['family'] == 'windows' {
@@ -508,7 +496,7 @@ define docker::run(
     $docker_run_inline_start = template('docker/docker-run-start.erb')
     $docker_run_inline_stop  = template('docker/docker-run-stop.erb')
 
-    case $service_provider_real {
+    case $service_provider {
       'systemd': {
         $initscript         = "/etc/systemd/system/${service_prefix}${sanitised_title}.service"
         $startscript        = "/usr/local/bin/docker-run-${sanitised_title}-start.sh"
@@ -562,7 +550,7 @@ define docker::run(
           ensure    => false,
           enable    => false,
           hasstatus => $hasstatus,
-          provider  => $service_provider_real,
+          provider  => $service_provider,
           notify    => Exec["remove container ${service_prefix}${sanitised_title}"],
         }
       }
@@ -659,7 +647,7 @@ define docker::run(
           service { "${service_prefix}${sanitised_title}":
             ensure    => $running and !$prepare_service_only,
             enable    => true,
-            provider  => $service_provider_real,
+            provider  => $service_provider,
             hasstatus => $hasstatus,
             require   => File[$initscript],
           }
@@ -681,7 +669,7 @@ define docker::run(
           }
         }
       }
-      if $service_provider_real == 'systemd' and !$prepare_service_only {
+      if $service_provider == 'systemd' and !$prepare_service_only {
         exec { "docker-${sanitised_title}-systemd-reload":
           path        => ['/bin/', '/sbin/', '/usr/bin/', '/usr/sbin/'],
           command     => 'systemctl daemon-reload',
